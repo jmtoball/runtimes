@@ -4,7 +4,7 @@ import os
 import imp
 import datetime
 
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, Manager
 import bottle
 import prometheus_client as prom
 
@@ -34,11 +34,13 @@ function_context = {
     'memory-limit': os.getenv('FUNC_MEMORY_LIMIT'),
 }
 
-def funcWrap(q, event, c):
+def funcWrap(q, event, c, namespace):
+    event["extensions"]["response"] = namespace.response
     try:
         q.put(func(event, c))
     except Exception as inst:
         q.put(inst)
+    namespace.response = event["extensions"]["response"].copy()
 
 @app.get('/healthz')
 def healthz():
@@ -72,7 +74,9 @@ def handler():
     with func_errors.labels(method).count_exceptions():
         with func_hist.labels(method).time():
             q = Queue()
-            p = Process(target=funcWrap, args=(q, event, function_context))
+            namespace = Manager().Namespace()
+            namespace.response = bottle.response
+            p = Process(target=funcWrap, args=(q, event, function_context, namespace))
             p.start()
             p.join(timeout)
             # If thread is still active
@@ -82,6 +86,10 @@ def handler():
                 return bottle.HTTPError(408, "Timeout while processing the function")
             else:
                 res = q.get()
+                bottle.response._headers = namespace.response._headers
+                bottle.response._status_code = namespace.response._status_code
+                bottle.response._status_line = namespace.response._status_line
+                bottle.response._cookies = namespace.response._cookies
                 if isinstance(res, Exception):
                     raise res
                 return res
